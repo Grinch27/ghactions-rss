@@ -312,20 +312,20 @@ jobs:
             --output dist \
             --report-json generation-report.json
 
-      - name: Record wrangler-action main HEAD
-        id: wrangler-action-head
+      - name: Record wrangler-action v4 commit
+        id: wrangler-action-ref
         run: |
           set -euo pipefail
           sha="$(git ls-remote \
             https://github.com/cloudflare/wrangler-action.git \
-            refs/heads/main | awk '{print $1}')"
-          : "${sha:?Unable to resolve cloudflare/wrangler-action@main}"
+            refs/tags/v4 | awk '{print $1}')"
+          : "${sha:?Unable to resolve cloudflare/wrangler-action@v4}"
           printf 'sha=%s\n' "${sha}" >> "${GITHUB_OUTPUT}"
-          printf 'cloudflare/wrangler-action@main HEAD: %s\n' "${sha}"
+          printf 'cloudflare/wrangler-action@v4 commit: %s\n' "${sha}"
 
       - name: Resolve Wrangler version and deploy to Cloudflare Pages
         id: deploy-pages
-        uses: cloudflare/wrangler-action@main
+        uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -349,7 +349,7 @@ jobs:
 
       - name: Record deployment evidence
         env:
-          WRANGLER_ACTION_SHA: ${{ steps.wrangler-action-head.outputs.sha }}
+          WRANGLER_ACTION_SHA: ${{ steps.wrangler-action-ref.outputs.sha }}
           DEPLOYMENT_URL: ${{ steps.deploy-pages.outputs.deployment-url }}
           DEPLOYMENT_ALIAS_URL: ${{ steps.deploy-pages.outputs.pages-deployment-alias-url }}
           DEPLOYMENT_ID: ${{ steps.deploy-pages.outputs.pages-deployment-id }}
@@ -361,8 +361,8 @@ jobs:
             printf 'commit=%s\n' "${GITHUB_SHA}"
             printf 'run_id=%s\n' "${GITHUB_RUN_ID}"
             printf 'run_attempt=%s\n' "${GITHUB_RUN_ATTEMPT}"
-            printf 'wrangler_action_ref=cloudflare/wrangler-action@main\n'
-            printf 'wrangler_action_main_head=%s\n' "${WRANGLER_ACTION_SHA}"
+            printf 'wrangler_action_ref=cloudflare/wrangler-action@v4\n'
+            printf 'wrangler_action_commit=%s\n' "${WRANGLER_ACTION_SHA}"
             wrangler_version="$(cat wrangler-version.txt 2>/dev/null || true)"
             printf 'wrangler_version=%s\n' "${wrangler_version//$'\n'/ }"
             printf 'pages_project=%s\n' "${PAGES_PROJECT}"

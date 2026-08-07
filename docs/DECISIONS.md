@@ -12,9 +12,9 @@
 - D42: no feed-level retry.
 - D45: feeds are independent; a failed feed must not prevent unrelated feeds from updating when the previous state can be safely preserved.
 - D46: final public feed paths are extensionless and mirror RSSHub paths.
-- D73: deploy with `cloudflare/wrangler-action@main`.
+- D73: deploy with the executable floating release `cloudflare/wrangler-action@v4`; `@main` is not an executable action because its generated `dist/index.mjs` is absent.
 - D74: do not specify `wranglerVersion`.
-- D75: record the observed `wrangler-action@main` HEAD and actual Wrangler `--version` output on every run.
+- D75: record the observed `wrangler-action@v4` tag commit and actual Wrangler `--version` output on every run.
 - Base workflow structure: derived from the supplied `uboot_allinone.yml` architecture: `runner-image -> resolver -> action -> publication`.
 
 ## Workflow mapping from uboot_allinone
@@ -41,6 +41,7 @@ These were required to make D45 deterministic without adding R2/KV/state branche
 - If the new refresh fails and the previous path is a definite 404, mark the feed `UNAVAILABLE` and continue with unrelated feeds.
 - If the new refresh fails and the previous state cannot be safely determined (network error, 5xx, invalid XML, etc.), mark it `BLOCKED` and stop before deployment to avoid accidentally deleting an existing feed.
 - Removing a feed from `feeds.json` is an explicit deletion in the next successful deployment.
+- The generated `/_feed-state.json` manifest records managed routes so a later run can report explicit `REMOVED` states without directory listing, server-side state, or extra infrastructure.
 
 ## No automatic additions
 

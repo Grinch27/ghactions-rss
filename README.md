@@ -15,7 +15,7 @@ GitHub Actions
   -> validate RSS XML
   -> preserve the current Pages copy when an individual refresh fails
   -> upload the validated site as a short-lived GitHub Artifact
-  -> deploy the Artifact to Cloudflare Pages with cloudflare/wrangler-action@main
+  -> deploy the Artifact to Cloudflare Pages with cloudflare/wrangler-action@v4
   -> production smoke test
 ```
 
@@ -175,7 +175,7 @@ A separate `deployment-evidence` Artifact records:
 ```text
 ghactions-rss commit
 workflow run ID / attempt
-cloudflare/wrangler-action@main observed main HEAD
+cloudflare/wrangler-action@v4 observed tag commit
 Wrangler version observed in the same `wrangler-action` invocation that performs the Pages deployment
 Pages project
 deployment ID
@@ -185,7 +185,7 @@ Pages environment
 timestamp
 ```
 
-`cloudflare/wrangler-action@main` is intentionally mutable. The workflow records the observed `main` HEAD immediately before use as evidence; GitHub does not expose a first-class variable containing the exact internally resolved action commit, so this is a best-effort race-minimized observation rather than a cryptographic pin.
+`cloudflare/wrangler-action@v4` is intentionally mutable. The workflow records the observed `v4` tag commit immediately before use as evidence; GitHub does not expose a first-class variable containing the exact internally resolved action commit, so this is a best-effort race-minimized observation rather than a cryptographic pin. The branch ref `@main` is not used because its `action.yml` currently targets a generated `dist/index.mjs` that is absent from the branch, while the release tag contains the executable bundle.
 
 ## Important limitations
 

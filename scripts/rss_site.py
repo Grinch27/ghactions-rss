@@ -19,6 +19,7 @@ from urllib.parse import quote, unquote
 USER_AGENT = "ghactions-rss/1.0"
 MAX_ROUTE_LENGTH = 2048
 URL_PATH_SAFE = "/%:@!$&'()*+,;=._~-"
+MANIFEST_ROUTE = "/_feed-state.json"
 
 
 class ConfigError(ValueError):
@@ -244,7 +245,28 @@ def validate_fetch(fetch: FetchResult, allow_empty: bool) -> tuple[bool, str | N
         return False, str(exc)
 
 
-def write_static_support(output: Path, providers: list[str]) -> None:
+def validate_manifest(fetch: FetchResult) -> tuple[bool, set[str], str | None]:
+    if not fetch.ok or fetch.body is None:
+        return False, set(), fetch.error
+    try:
+        raw = json.loads(fetch.body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False, set(), "MANIFEST_JSON_INVALID"
+    if not isinstance(raw, dict) or raw.get("schema_version") != 1:
+        return False, set(), "MANIFEST_SCHEMA_INVALID"
+    routes_raw = raw.get("routes")
+    if not isinstance(routes_raw, list):
+        return False, set(), "MANIFEST_ROUTES_INVALID"
+    try:
+        routes = [normalize_route(route) for route in routes_raw]
+    except ConfigError:
+        return False, set(), "MANIFEST_ROUTE_INVALID"
+    if len(routes) != len(set(routes)):
+        return False, set(), "MANIFEST_ROUTES_DUPLICATE"
+    return True, set(routes), None
+
+
+def write_static_support(output: Path, providers: list[str], routes: list[str]) -> None:
     output.mkdir(parents=True, exist_ok=True)
     headers: list[str] = []
     common = [
@@ -264,6 +286,10 @@ def write_static_support(output: Path, providers: list[str]) -> None:
         "<!doctype html><meta charset=\"utf-8\"><title>404</title><h1>404</h1>\n",
         encoding="utf-8",
     )
+    (output / MANIFEST_ROUTE.lstrip("/")).write_text(
+        json.dumps({"schema_version": 1, "routes": routes}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def generate(args: argparse.Namespace) -> int:
@@ -281,6 +307,17 @@ def generate(args: argparse.Namespace) -> int:
     results: list[FeedResult] = []
     blocked = False
     selected_seen = 0
+    configured_routes = [feed.route for feed in config["feeds"]]
+
+    previous_manifest = request_once(
+        route_url(pages_base, MANIFEST_ROUTE), timeout, max_bytes
+    )
+    manifest_valid, previous_routes, manifest_error = validate_manifest(previous_manifest)
+    if previous_manifest.status == 404:
+        previous_routes = set()
+        manifest_error = None
+    elif not manifest_valid:
+        blocked = True
 
     for feed in config["feeds"]:
         selected = scope == "all" or feed.route == scope
@@ -343,7 +380,23 @@ def generate(args: argparse.Namespace) -> int:
             f"previous={previous.status} current={current.status}"
         )
 
-    write_static_support(output, config["providers"])
+    for route in sorted(previous_routes - set(configured_routes)):
+        results.append(
+            FeedResult(
+                route=route,
+                state="REMOVED",
+                selected=False,
+                previous_status=None,
+                previous_valid=True,
+                current_status=None,
+                current_valid=False,
+                final_sha256=None,
+                error="REMOVED_FROM_CONFIG",
+            )
+        )
+        print(f"{route}: state=REMOVED selected=False previous=manifest current=None")
+
+    write_static_support(output, config["providers"], configured_routes)
 
     counts: dict[str, int] = {}
     for result in results:
@@ -363,6 +416,11 @@ def generate(args: argparse.Namespace) -> int:
         "rsshub_base_url": rsshub_base,
         "counts": counts,
         "blocked": blocked,
+        "baseline_manifest": {
+            "status": previous_manifest.status,
+            "valid": manifest_valid,
+            "error": manifest_error,
+        },
         "feeds": [asdict(result) for result in results],
     }
     Path(args.report_json).write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -381,7 +439,7 @@ def generate(args: argparse.Namespace) -> int:
         "## Summary",
         "",
     ]
-    for state in ("UPDATED", "PRESERVED", "UNAVAILABLE", "BLOCKED"):
+    for state in ("UPDATED", "PRESERVED", "UNAVAILABLE", "REMOVED", "BLOCKED"):
         lines.append(f"- {state}: `{counts.get(state, 0)}`")
     lines.extend(["", "## Feeds", ""])
     for result in results:
@@ -424,7 +482,16 @@ def validate_site(args: argparse.Namespace) -> int:
         else:
             raise FeedValidationError(f"unsupported artifact state {state}: {feed.route}")
 
-    if not (output / "_headers").is_file() or not (output / "404.html").is_file():
+    configured_routes = {feed.route for feed in config["feeds"]}
+    for route, item in by_route.items():
+        if route in configured_routes:
+            continue
+        if item.get("state") != "REMOVED":
+            raise FeedValidationError(f"unexpected unconfigured report route: {route}")
+        if route_output_path(output, route).exists():
+            raise FeedValidationError(f"REMOVED feed unexpectedly has output: {route}")
+
+    if not all((output / name).is_file() for name in ("_headers", "404.html", MANIFEST_ROUTE.lstrip("/"))):
         raise FeedValidationError("static support files are missing")
     print("Static RSS site validation passed.")
     return 0
@@ -469,6 +536,17 @@ def smoke(args: argparse.Namespace) -> int:
         else:
             print(f"Unexpected state in smoke report: {state}", file=sys.stderr)
             failures += 1
+
+    configured_routes = {feed.route for feed in config["feeds"]}
+    for route, item in by_route.items():
+        if route in configured_routes or item.get("state") != "REMOVED":
+            continue
+        result = request_once(route_url(base_url, route), timeout, max_bytes)
+        if result.status != 404:
+            print(f"Expected 404 for removed feed {route}, got {result.status}", file=sys.stderr)
+            failures += 1
+        else:
+            print(f"Smoke passed {route}: REMOVED=404")
 
     if failures:
         return 1

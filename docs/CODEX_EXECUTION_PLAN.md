@@ -84,7 +84,7 @@ deploy
 9. Confirm `rsshub-image` resolves `diygod/rsshub:latest` to an immutable digest.
 10. Confirm `action` starts RSSHub by the resolved digest and processes `/javbus/star/rwt`.
 11. Confirm Artifact `rss-site-build` contains the expected files and validates with `SHA256SUMS.txt`.
-12. Confirm `deploy` uses `cloudflare/wrangler-action@main` and does not set `wranglerVersion`.
+12. Confirm `deploy` uses `cloudflare/wrangler-action@v4` and does not set `wranglerVersion`.
 13. Confirm Pages returns the feed at the extensionless route:
 
 ```text
@@ -93,7 +93,7 @@ deploy
 
 14. Confirm Content-Type contains `application/rss+xml` and XML is valid.
 15. Confirm unknown route returns 404.
-16. Record the observed RSSHub digest, wrangler-action main HEAD, Wrangler version, Pages deployment ID/URL/environment, and final commit.
+16. Record the observed RSSHub digest, wrangler-action v4 commit, Wrangler version, Pages deployment ID/URL/environment, and final commit.
 
 ## Do not do
 
