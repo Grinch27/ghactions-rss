@@ -1,0 +1,385 @@
+name: RSSHub (All in One)
+
+# GitHub Actions workflow syntax reference:
+# https://docs.github.com/actions/reference/workflows-and-actions/workflow-syntax
+# Cloudflare Pages Direct Upload:
+# https://developers.cloudflare.com/pages/get-started/direct-upload/
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/rss_allinone.yml"
+      - "config/**"
+      - "scripts/**"
+  schedule:
+    # Run once per hour, away from the top-of-hour peak.
+    - cron: "23 * * * *"
+      timezone: "Etc/UTC"
+  repository_dispatch:
+    types:
+      - rss_generate
+  workflow_dispatch:
+    inputs:
+      feed_route:
+        description: "Configured RSSHub route to refresh, or all"
+        required: true
+        default: "all"
+        type: string
+      custom_env:
+        description: "key=value;key=value (non-secret only)"
+        type: string
+        required: false
+        default: ""
+
+run-name: >-
+  RSSHub Static Pages -
+  ${{ github.event_name }} -
+  ${{ github.ref_name }} -
+  ${{ inputs.feed_route || github.event.client_payload.feed_route || 'all' }}
+
+permissions:
+  contents: read
+  deployments: write
+
+concurrency:
+  group: ghactions-rss-pages-production
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  TZ: Etc/UTC
+  DISPLAY_TZ: Etc/UTC
+  LANG: C.UTF-8
+  LC_ALL: C.UTF-8
+  GIT_TERMINAL_PROMPT: "0"
+
+  # Upstream runtime
+  RSSHUB_IMAGE: "diygod/rsshub:latest"
+  RSSHUB_PORT: "1200"
+
+  # Cloudflare Pages
+  PAGES_PROJECT: "${{ vars.PAGES_PROJECT || 'ghactions-rss' }}"
+  PAGES_BASE_URL: "${{ vars.PAGES_BASE_URL || 'https://ghactions-rss.pages.dev' }}"
+
+  # Workflow inputs
+  feed_route: "${{ inputs.feed_route || github.event.client_payload.feed_route || 'all' }}"
+  custom_env: "${{ inputs.custom_env || github.event.client_payload.custom_env || '' }}"
+
+jobs:
+  runner-image:
+    name: ubuntu-latest - runner-image
+    runs-on: &step_image ubuntu-latest
+    outputs:
+      RUNNER_IMAGE: ${{ steps.resolve-runner-image.outputs.RUNNER_IMAGE }}
+    steps:
+      - name: Resolve runner-image
+        id: resolve-runner-image
+        uses: Grinch27/github-actions/.github/actions/resolve-runner-image@main
+
+  rsshub-image:
+    name: ${{ needs.runner-image.outputs.RUNNER_IMAGE }} - rsshub:latest - image
+    needs: runner-image
+    runs-on: ${{ needs.runner-image.outputs.RUNNER_IMAGE }}
+    outputs:
+      RSSHUB_IMAGE_REF: ${{ steps.resolve-rsshub.outputs.RSSHUB_IMAGE_REF }}
+      RSSHUB_IMAGE_ID: ${{ steps.resolve-rsshub.outputs.RSSHUB_IMAGE_ID }}
+      RSSHUB_DIGEST: ${{ steps.resolve-rsshub.outputs.RSSHUB_DIGEST }}
+    steps:
+      - name: Resolve RSSHub latest image
+        id: resolve-rsshub
+        run: |
+          set -euo pipefail
+
+          : "${RSSHUB_IMAGE:?RSSHUB_IMAGE is empty}"
+          docker pull "${RSSHUB_IMAGE}"
+
+          image_ref="$(docker image inspect \
+            --format '{{index .RepoDigests 0}}' \
+            "${RSSHUB_IMAGE}")"
+          image_id="$(docker image inspect \
+            --format '{{.Id}}' \
+            "${RSSHUB_IMAGE}")"
+
+          if [[ -z "${image_ref}" || "${image_ref}" != *@sha256:* ]]; then
+            printf 'Unable to resolve immutable RSSHub RepoDigest.\n' >&2
+            exit 1
+          fi
+
+          digest="${image_ref#*@}"
+
+          printf 'RSSHub image tag: %s\n' "${RSSHUB_IMAGE}"
+          printf 'RSSHub resolved ref: %s\n' "${image_ref}"
+          printf 'RSSHub image id: %s\n' "${image_id}"
+
+          printf 'RSSHUB_IMAGE_REF=%s\n' "${image_ref}" >> "${GITHUB_OUTPUT}"
+          printf 'RSSHUB_IMAGE_ID=%s\n' "${image_id}" >> "${GITHUB_OUTPUT}"
+          printf 'RSSHUB_DIGEST=%s\n' "${digest}" >> "${GITHUB_OUTPUT}"
+
+  action:
+    name: >-
+      ${{ needs.runner-image.outputs.RUNNER_IMAGE }} -
+      rsshub@${{ needs.rsshub-image.outputs.RSSHUB_DIGEST }} -
+      ${{ inputs.feed_route || github.event.client_payload.feed_route || 'all' }}
+    needs:
+      - runner-image
+      - rsshub-image
+    runs-on: ${{ needs.runner-image.outputs.RUNNER_IMAGE }}
+    env:
+      RSSHUB_IMAGE_REF: ${{ needs.rsshub-image.outputs.RSSHUB_IMAGE_REF }}
+      RSSHUB_IMAGE_ID: ${{ needs.rsshub-image.outputs.RSSHUB_IMAGE_ID }}
+      RSSHUB_DIGEST: ${{ needs.rsshub-image.outputs.RSSHUB_DIGEST }}
+      PATH_OUTPUT: "${{ github.workspace }}/dist"
+      PATH_REPORT_JSON: "${{ github.workspace }}/generation-report.json"
+      PATH_REPORT_MD: "${{ github.workspace }}/generation-report.md"
+      PATH_IMAGE_INFO: "${{ github.workspace }}/rsshub-image.txt"
+      PATH_SHA256: "${{ github.workspace }}/SHA256SUMS.txt"
+    steps:
+      # ========== General Environment Setup: Start ==========
+      - name: Load Custom Environment Variables
+        id: env-custom
+        uses: Grinch27/github-actions/.github/actions/input-custom@main
+
+      - name: Checkout self
+        uses: actions/checkout@v6
+      # ========== General Environment Setup: End ==========
+
+      - name: Validate project configuration
+        run: |
+          set -euo pipefail
+          python3 scripts/rss_site.py validate-config \
+            --config config/feeds.json \
+            --scope "${feed_route}"
+
+      - name: Pull immutable RSSHub image
+        run: |
+          set -euo pipefail
+          : "${RSSHUB_IMAGE_REF:?RSSHUB_IMAGE_REF is empty}"
+          docker pull "${RSSHUB_IMAGE_REF}"
+          pulled_id="$(docker image inspect --format '{{.Id}}' "${RSSHUB_IMAGE_REF}")"
+          printf 'Expected image id: %s\n' "${RSSHUB_IMAGE_ID}"
+          printf 'Pulled image id:   %s\n' "${pulled_id}"
+          if [[ "${pulled_id}" != "${RSSHUB_IMAGE_ID}" ]]; then
+            printf 'RSSHub image ID changed after digest resolution.\n' >&2
+            exit 1
+          fi
+
+      - name: Start RSSHub
+        id: rsshub-start
+        run: |
+          set -euo pipefail
+
+          docker rm -f ghactions-rss-rsshub >/dev/null 2>&1 || true
+          docker run \
+            --detach \
+            --name ghactions-rss-rsshub \
+            --publish "127.0.0.1:${RSSHUB_PORT}:1200" \
+            --env NODE_ENV=production \
+            "${RSSHUB_IMAGE_REF}" >/dev/null
+
+          ready=0
+          for _ in $(seq 1 45); do
+            if curl \
+              --fail \
+              --silent \
+              --show-error \
+              --max-time 2 \
+              "http://127.0.0.1:${RSSHUB_PORT}/healthz" \
+              >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [[ "${ready}" != "1" ]]; then
+            docker ps -a --filter name=ghactions-rss-rsshub
+            printf 'RSSHub did not become ready.\n' >&2
+            exit 1
+          fi
+
+          printf 'RSSHub is ready on 127.0.0.1:%s.\n' "${RSSHUB_PORT}"
+
+      - name: Generate RSS Cycle
+        id: generate
+        run: |
+          set -euo pipefail
+
+          rm -rf -- "${PATH_OUTPUT}"
+          rm -f -- \
+            "${PATH_REPORT_JSON}" \
+            "${PATH_REPORT_MD}" \
+            "${PATH_IMAGE_INFO}" \
+            "${PATH_SHA256}"
+
+          python3 scripts/rss_site.py generate \
+            --config config/feeds.json \
+            --rsshub-base "http://127.0.0.1:${RSSHUB_PORT}" \
+            --pages-base "${PAGES_BASE_URL}" \
+            --output "${PATH_OUTPUT}" \
+            --scope "${feed_route}" \
+            --report-json "${PATH_REPORT_JSON}" \
+            --report-md "${PATH_REPORT_MD}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --commit "${GITHUB_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --rsshub-image-ref "${RSSHUB_IMAGE_REF}" \
+            --rsshub-image-id "${RSSHUB_IMAGE_ID}"
+
+      - name: Record RSSHub image evidence
+        run: |
+          set -euo pipefail
+          {
+            printf 'tag=%s\n' "${RSSHUB_IMAGE}"
+            printf 'resolved_ref=%s\n' "${RSSHUB_IMAGE_REF}"
+            printf 'image_id=%s\n' "${RSSHUB_IMAGE_ID}"
+            printf 'digest=%s\n' "${RSSHUB_DIGEST}"
+          } > "${PATH_IMAGE_INFO}"
+          cat "${PATH_IMAGE_INFO}"
+
+      - name: Generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          : > "${PATH_SHA256}"
+
+          while IFS= read -r -d '' file; do
+            sha256sum "${file}"
+          done < <(find dist -type f -print0 | sort -z) \
+            >> "${PATH_SHA256}"
+
+          sha256sum \
+            generation-report.json \
+            generation-report.md \
+            rsshub-image.txt \
+            >> "${PATH_SHA256}"
+
+          cat "${PATH_SHA256}"
+
+      - name: Stop RSSHub
+        if: always()
+        run: |
+          docker rm -f ghactions-rss-rsshub >/dev/null 2>&1 || true
+
+      - name: Upload RSS build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rss-site-build
+          path: |
+            dist/
+            generation-report.json
+            generation-report.md
+            rsshub-image.txt
+            SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Job summary
+        if: always()
+        run: |
+          if [[ -f generation-report.md ]]; then
+            cat generation-report.md >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+  deploy:
+    name: ${{ needs.runner-image.outputs.RUNNER_IMAGE }} - Cloudflare Pages - deploy
+    needs:
+      - runner-image
+      - action
+    runs-on: ${{ needs.runner-image.outputs.RUNNER_IMAGE }}
+    env:
+      PATH_DEPLOY_EVIDENCE: "${{ github.workspace }}/deployment-evidence.txt"
+    steps:
+      - name: Checkout self
+        uses: actions/checkout@v6
+
+      - name: Download RSS build artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: rss-site-build
+          path: .
+
+      - name: Verify RSS build artifact
+        run: |
+          set -euo pipefail
+          sha256sum --check SHA256SUMS.txt
+          python3 scripts/rss_site.py validate-site \
+            --config config/feeds.json \
+            --output dist \
+            --report-json generation-report.json
+
+      - name: Record wrangler-action main HEAD
+        id: wrangler-action-head
+        run: |
+          set -euo pipefail
+          sha="$(git ls-remote \
+            https://github.com/cloudflare/wrangler-action.git \
+            refs/heads/main | awk '{print $1}')"
+          : "${sha:?Unable to resolve cloudflare/wrangler-action@main}"
+          printf 'sha=%s\n' "${sha}" >> "${GITHUB_OUTPUT}"
+          printf 'cloudflare/wrangler-action@main HEAD: %s\n' "${sha}"
+
+      - name: Resolve Wrangler version and deploy to Cloudflare Pages
+        id: deploy-pages
+        uses: cloudflare/wrangler-action@main
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          preCommands: wrangler --version > wrangler-version.txt
+          command: >-
+            pages deploy dist
+            --project-name=${{ env.PAGES_PROJECT }}
+            --branch=main
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Production smoke
+        env:
+          DEPLOYMENT_URL: ${{ steps.deploy-pages.outputs.deployment-url }}
+        run: |
+          set -euo pipefail
+          : "${DEPLOYMENT_URL:?Cloudflare deployment URL is empty}"
+          python3 scripts/rss_site.py smoke \
+            --config config/feeds.json \
+            --base-url "${DEPLOYMENT_URL}" \
+            --report-json generation-report.json
+
+      - name: Record deployment evidence
+        env:
+          WRANGLER_ACTION_SHA: ${{ steps.wrangler-action-head.outputs.sha }}
+          DEPLOYMENT_URL: ${{ steps.deploy-pages.outputs.deployment-url }}
+          DEPLOYMENT_ALIAS_URL: ${{ steps.deploy-pages.outputs.pages-deployment-alias-url }}
+          DEPLOYMENT_ID: ${{ steps.deploy-pages.outputs.pages-deployment-id }}
+          PAGES_ENVIRONMENT: ${{ steps.deploy-pages.outputs.pages-environment }}
+        run: |
+          set -euo pipefail
+          {
+            printf 'repository=%s\n' "${GITHUB_REPOSITORY}"
+            printf 'commit=%s\n' "${GITHUB_SHA}"
+            printf 'run_id=%s\n' "${GITHUB_RUN_ID}"
+            printf 'run_attempt=%s\n' "${GITHUB_RUN_ATTEMPT}"
+            printf 'wrangler_action_ref=cloudflare/wrangler-action@main\n'
+            printf 'wrangler_action_main_head=%s\n' "${WRANGLER_ACTION_SHA}"
+            wrangler_version="$(cat wrangler-version.txt 2>/dev/null || true)"
+            printf 'wrangler_version=%s\n' "${wrangler_version//$'\n'/ }"
+            printf 'pages_project=%s\n' "${PAGES_PROJECT}"
+            printf 'deployment_url=%s\n' "${DEPLOYMENT_URL}"
+            printf 'deployment_alias_url=%s\n' "${DEPLOYMENT_ALIAS_URL}"
+            printf 'deployment_id=%s\n' "${DEPLOYMENT_ID}"
+            printf 'pages_environment=%s\n' "${PAGES_ENVIRONMENT}"
+            printf 'timestamp_utc=%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          } > "${PATH_DEPLOY_EVIDENCE}"
+
+          cat "${PATH_DEPLOY_EVIDENCE}"
+          cat "${PATH_DEPLOY_EVIDENCE}" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload deployment evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-evidence
+          path: deployment-evidence.txt
+          if-no-files-found: error
+          retention-days: 7

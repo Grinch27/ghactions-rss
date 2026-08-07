@@ -1,0 +1,22 @@
+# Generated site and local evidence
+dist/
+tmp/
+generation-report.json
+generation-report.md
+rsshub-image.txt
+deployment-evidence.txt
+wrangler-version.txt
+*.sha256
+
+# Local secrets / environment
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+
+# Tool state
+.wrangler/
+__pycache__/
+*.pyc
