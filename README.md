@@ -66,12 +66,17 @@ README.md
 
 `config/feeds.json` is the production declaration.
 
+`providers` is an allowlist of RSSHub route prefixes. Adding a provider only permits routes under that prefix to be declared; it does not automatically publish every route below that prefix. Every published route must still be listed explicitly in `feeds`.
+
 Example:
 
 ```json
 {
   "version": 1,
-  "providers": ["/javbus"],
+  "providers": [
+    "/javbus",
+    "/bilibili"
+  ],
   "feed_interval_seconds": 2,
   "request_timeout_seconds": 60,
   "max_response_bytes": 5000000,
@@ -79,10 +84,24 @@ Example:
     {
       "route": "/javbus/star/rwt",
       "allow_empty": false
+    },
+    {
+      "route": "/bilibili/popular/all",
+      "allow_empty": false
     }
   ]
 }
 ```
+
+To configure another provider:
+
+1. Add its route prefix to `providers`.
+2. Add every exact route to be published to `feeds`.
+3. Set `allow_empty` independently for each feed.
+
+Adding `"/bilibili"` does not publish all `/bilibili/*` routes. Only routes explicitly present in `feeds` are materialized.
+
+Configured routes are currently path-only. Query strings and routes requiring RSSHub provider secrets are outside the current scope.
 
 To add another JavBus subpage, add another exact RSSHub route. The generator deliberately does not parse JavBus concepts such as `star`, `genre`, `series`, `language`, or `search`; RSSHub remains responsible for route semantics.
 
