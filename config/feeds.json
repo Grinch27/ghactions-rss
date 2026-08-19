@@ -2,7 +2,7 @@
   "version": 1,
   "providers": [
     "/javbus",
-    "/github"
+    "/bilibili"
   ],
   "feed_interval_seconds": 2,
   "request_timeout_seconds": 60,
@@ -13,12 +13,8 @@
       "allow_empty": false
     },
     {
-      "route": "/github/issue/DIYgod/RSSHub/open",
-      "allow_empty": true
-    },
-    {
-      "route": "/github/search/RSSHub/bestmatch/desc",
-      "allow_empty": true
+      "route": "/bilibili/popular/all",
+      "allow_empty": false
     }
   ]
 }
