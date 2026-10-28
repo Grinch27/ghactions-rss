@@ -98,7 +98,7 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: private/worker
           command: deploy
-          quiet: 'true'
+          quiet: 'false'
           secrets: |
             READONLY
             WRITEONLY
@@ -173,7 +173,7 @@ jobs:
           CF_DEPLOYMENT_URL: ${{ steps.publish.outputs.deployment-url }}
         run: python3 scripts/rss_site.py verify --data-directory private --base-url "$PAGES_BASE_URL"
       - name: Save private deployment result
-        if: always() && steps.verify.outcome == 'success'
+        if: always() && (steps.verify.outcome == 'success' || steps.verify.outcome == 'failure')
         env:
           WRITEONLY: ${{ secrets.WRITEONLY }}
         run: python3 scripts/rss_site.py persist --data-directory private

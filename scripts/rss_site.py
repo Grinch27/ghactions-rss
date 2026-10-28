@@ -309,6 +309,9 @@ def verify(directory, base):
             return
         except (OSError, ValueError, CycleError) as exc:
             if attempt == 5:
+                write_json(directory / "state" / "deployment.json", {"verified_at": now(), "snapshot_id": expected["snapshot_id"], "status": "failed",
+                           "error_type": type(exc).__name__, "error_detail": str(exc)[:1024],
+                           "http_status": getattr(exc, "code", None), "deployment_id": os.environ.get("CF_DEPLOYMENT_ID")})
                 raise CycleError("PUBLICATION_VERIFICATION_FAILED") from exc
             time.sleep(5)
 
