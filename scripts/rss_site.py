@@ -23,6 +23,7 @@ import xml.etree.ElementTree as ET
 ATOM = "http://www.w3.org/2005/Atom"
 ET.register_namespace("atom", ATOM)
 XML_TYPES = {"application/rss+xml", "application/atom+xml", "application/xml", "text/xml"}
+PUBLIC_HEADERS = {"User-Agent": "ghactions-rss/2 (+https://github.com/Grinch27/ghactions-rss)"}
 
 
 class CycleError(Exception):
@@ -214,6 +215,8 @@ def generate(directory, base, fetcher=fetch_feed):
             target.write_bytes(body)
         state = {"schema_version": 2, "id": identifier, "route": feed["route"], "status": status,
                  "last_attempt_at": snapshot["generated_at"], "last_success_at": snapshot["generated_at"] if status == "UPDATED" else previous.get("last_success_at"), "error": error}
+        if previous.get("migrated_baseline"):
+            state["migrated_baseline"] = previous["migrated_baseline"]
         write_json(state_path, state)
         return state
 
@@ -241,6 +244,38 @@ def generate(directory, base, fetcher=fetch_feed):
             stream.write(f"snapshot_id={snapshot['snapshot_id']}\npublishable={str(publishable).lower()}\n")
     print(json.dumps({"event": "cycle", "publishable": publishable, "counts": counts}))
     return publishable
+
+
+def migrate_baselines(directory, legacy_base):
+    settings, feeds = load_configuration(directory)
+    parsed = urlsplit(legacy_base)
+    if parsed.scheme != "https" or parsed.query or parsed.fragment or parsed.username:
+        raise CycleError("INVALID_LEGACY_BASE")
+    migrated = 0
+    for feed in feeds:
+        target = directory / "site" / "feeds" / feed["output"] / (feed["id"] + ".xml")
+        if target.exists():
+            continue
+        try:
+            with urlopen(Request(legacy_base.rstrip("/") + feed["route"], headers=PUBLIC_HEADERS), timeout=20) as response:
+                if response.headers.get_content_type() not in XML_TYPES:
+                    continue
+                body = response.read(int(settings["max_response_bytes"]) + 1)
+            if len(body) > settings["max_response_bytes"]:
+                continue
+            root = parse_feed(body, feed["output"], feed.get("allow_empty", True))
+            normalized = normalize_feed(body, feed, settings["public_base_url"])
+        except (OSError, CycleError):
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(normalized)
+        state_path = directory / "state" / "feeds" / (feed["id"] + ".json")
+        previous = read_json(state_path) if state_path.exists() else {}
+        previous["migrated_baseline"] = {"migrated_at": now(), "source": legacy_base,
+                                          "source_last_build_date": root.findtext("channel/lastBuildDate")}
+        write_json(state_path, previous)
+        migrated += 1
+    print(json.dumps({"event": "baselines_migrated", "count": migrated}))
 
 
 def git(directory, *arguments, env=None, check=True):
@@ -284,7 +319,7 @@ def verify(directory, base):
     settings, feeds = load_configuration(directory)
     for attempt in range(6):
         try:
-            with urlopen(base.rstrip("/") + "/_snapshot.json?cycle=" + expected["snapshot_id"], timeout=20) as response:
+            with urlopen(Request(base.rstrip("/") + "/_snapshot.json?cycle=" + expected["snapshot_id"], headers=PUBLIC_HEADERS), timeout=20) as response:
                 deployed = json.loads(response.read(4096))
             if deployed.get("snapshot_id") != expected["snapshot_id"]:
                 raise CycleError("DEPLOYMENT_NOT_CURRENT")
@@ -292,7 +327,7 @@ def verify(directory, base):
                 relative = Path("feeds") / feed["output"] / (feed["id"] + ".xml")
                 if not (directory / "site" / relative).exists():
                     continue
-                with urlopen(base.rstrip("/") + "/" + relative.as_posix(), timeout=20) as response:
+                with urlopen(Request(base.rstrip("/") + "/" + relative.as_posix(), headers=PUBLIC_HEADERS), timeout=20) as response:
                     if response.headers.get_content_type() not in XML_TYPES:
                         raise CycleError("PUBLISHED_CONTENT_TYPE_INVALID")
                     body = response.read(int(settings["max_response_bytes"]) + 1)
@@ -318,10 +353,11 @@ def verify(directory, base):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("validate", "image", "generate", "persist", "verify"))
+    parser.add_argument("command", choices=("validate", "image", "generate", "persist", "verify", "migrate"))
     parser.add_argument("--data-directory", type=Path, required=True)
     parser.add_argument("--rsshub-base", default="http://127.0.0.1:1200")
     parser.add_argument("--base-url")
+    parser.add_argument("--legacy-base-url")
     args = parser.parse_args()
     directory = args.data_directory.resolve()
     try:
@@ -332,6 +368,8 @@ def main():
             return 0 if generate(directory, args.rsshub_base) else 2
         elif args.command == "persist":
             persist(directory)
+        elif args.command == "migrate":
+            migrate_baselines(directory, args.legacy_base_url)
         elif args.command == "verify":
             verify(directory, args.base_url)
     except Exception as exc:

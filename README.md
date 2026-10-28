@@ -13,12 +13,14 @@ Repository secrets:
 | `READONLY` | Fine-grained token for the data repository, Contents read |
 | `WRITEONLY` | Fine-grained token for the data repository, Contents read and write |
 | `CLOUDFLARE_ACCOUNT_ID` | Existing deployment account |
-| `CLOUDFLARE_API_TOKEN` | Pages deployment; Workers Scripts edit and zone Workers Routes edit when deploying the gateway |
+| `CLOUDFLARE_API_TOKEN` | Pages deployment |
 | `RSSHUB_ENV` | Optional multiline Docker environment file containing provider cookies/tokens |
 
-`WRITEONLY` is a credential name; GitHub Contents write access includes read access. Keep all token values out of source and logs. The optional gateway deployment injects the two GitHub secrets into the Worker using Wrangler's secrets input.
+`WRITEONLY` is a credential name; GitHub Contents write access includes read access. Keep all token values out of source and logs. Set the same two secrets manually in the separate Worker. The execution pipeline does not manage Worker source, routes or secrets.
 
-Normal code pushes run dependency-free generator tests. A maintenance commit containing `[refresh]` also starts a complete refresh. `[gateway]` together with `[refresh]` additionally deploys private gateway source. Manual Run workflow refreshes all subscriptions; enable `deploy_gateway` only for gateway updates. No arbitrary route input is exposed in the public workflow.
+Normal code pushes run dependency-free generator tests. A maintenance commit containing `[refresh]` also starts a complete refresh. Manual Run workflow refreshes all subscriptions. No arbitrary route input is exposed in the public workflow.
+
+The one-time `[refresh] [import]` migration imports missing, valid XML from the former Pages project as previous snapshots before refreshing. Its original content dates are retained; migration does not claim the source has refreshed successfully.
 
 The target private repository and new Pages project are configured in the workflow. There is no data/publication branch. The previous Pages project and `/rsshub/*` service are preserved.
 

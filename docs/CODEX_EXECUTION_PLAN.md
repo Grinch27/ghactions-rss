@@ -7,7 +7,7 @@
 5. Read private `main` with `READONLY`; save `site/` and `state/` with `WRITEONLY`. Never inspect or print token values.
 6. Publish only `site/`, after a successful private push. Use normal main push/rebase to retain subscriptions registered during a run.
 7. Verify the expected snapshot marker, valid XML and public self URLs. Save deployment evidence privately.
-8. When changing gateway source, manually enable `deploy_gateway` or use `[refresh] [gateway]`. Wrangler injects the configured secrets. Registration does not rebuild the gateway.
+8. Deploy private gateway source separately through the connected Cloudflare API or Wrangler. Preserve manually configured Worker secrets. Registration does not rebuild the gateway. The Pages deployment token needs no Worker administration permissions.
 9. A green pipeline may contain `PRESERVED`/`UNAVAILABLE` feeds. Read `state/feeds/` and last-success timestamps in the private repository to assess source freshness.
 
 Do not publish registry files, provider environment variables, detailed reports or Docker logs in public artifacts. Do not rewrite repository history, create output branches, or alter unrelated production routes.

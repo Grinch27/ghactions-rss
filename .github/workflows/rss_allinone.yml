@@ -8,11 +8,6 @@ on:
     - cron: '0 0,6,12,18 * * *'
       timezone: Asia/Shanghai
   workflow_dispatch:
-    inputs:
-      deploy_gateway:
-        description: Deploy the private gateway source and inject READONLY / WRITEONLY
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -88,23 +83,9 @@ jobs:
         run: |
           python3 scripts/rss_site.py validate --data-directory private
           node --test private/worker/tests/*.test.mjs
-      - name: Deploy gateway when requested
-        id: gateway
-        if: inputs.deploy_gateway || contains(github.event.head_commit.message, '[gateway]')
-        continue-on-error: true
-        uses: cloudflare/wrangler-action@v4
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          workingDirectory: private/worker
-          command: deploy
-          quiet: 'false'
-          secrets: |
-            READONLY
-            WRITEONLY
-        env:
-          READONLY: ${{ secrets.READONLY }}
-          WRITEONLY: ${{ secrets.WRITEONLY }}
+      - name: Import existing public baselines during migration
+        if: contains(github.event.head_commit.message, '[import]')
+        run: python3 scripts/rss_site.py migrate --data-directory private --legacy-base-url https://ghactions-rss.pages.dev
       - name: Initialize distribution during migration
         if: contains(github.event.head_commit.message, '[bootstrap]')
         uses: cloudflare/wrangler-action@v4
@@ -181,7 +162,7 @@ jobs:
         if: always()
         run: docker rm -f ghactions-rss-runtime >/dev/null 2>&1 || true
       - name: Report blocked cycle
-        if: always() && (steps.generate.outcome == 'failure' || steps.gateway.outcome == 'failure')
+        if: always() && steps.generate.outcome == 'failure'
         run: |
           echo 'A requested operation failed. Detailed feed state is in the private repository.' >&2
           exit 1
