@@ -1,62 +1,16 @@
-# Architecture Decisions
+# Current architecture decisions — 2026-10-28
 
-## Locked user decisions
+- The public repository is an execution node. Registry, generated XML, state and gateway source are private.
+- Every repository uses `main` only. Normal fast-forward pushes and bounded fetch/rebase preserve concurrent gateway registrations. No force push.
+- Registration is passive. The four native GitHub schedules use Asia/Shanghai; no per-route dispatch or Pages rebuild.
+- RSS and Atom are public. Public snapshots contain hashed file paths and no registry/index listing. This does not make published feed content confidential.
+- Exact path, query order, duplicate parameters and percent encoding are retained in subscription identity. Only native RSS/Atom outputs are supported.
+- Use the official full image with bundled Chromium; upstream route implementations are not copied. Provider credentials can be supplied by `RSSHUB_ENV`.
+- Different providers may refresh concurrently; requests to the same provider are serialized with a minimum interval. No automatic feed retry.
+- Failed refreshes retain valid previous XML. An invalid baseline that cannot be replaced blocks the complete publication. A new unavailable feed remains pending until a later successful refresh.
+- Results are committed privately before Pages Direct Upload. Registration commits do not trigger Pages. This needs no Deploy Hook secret or private GitHub App connection in Pages.
+- Deploy with `cloudflare/wrangler-action@v4`, without a Wrangler version pin. Raw logs, responses, XML and detailed reports are not public artifacts.
+- A first registration returns a valid empty pending feed only after GitHub acknowledges the record. New registrations cannot succeed without both configured gateway secrets.
+- The gateway handles only `1616255.xyz/ghactions-rss/*`; the existing `/rsshub/*` service is preserved.
 
-- D1: `ghactions-rss` is intended to expand beyond JavBus RSSHub routes; JavBus is the pilot.
-- D4: GitHub Actions directly runs official RSSHub.
-- D12: use RSSHub `latest` and record its digest. This implementation resolves `latest` once and uses that exact digest throughout the run.
-- D19: route templates are delegated to RSSHub; exact feed instances are explicitly materialized by `feeds.json`.
-- D23: do not implement a separate language model; pass the configured native RSSHub path unchanged.
-- D24/D25: Phase 1 does not support alternate JavBus domains because all query strings are forbidden.
-- D33: refresh once per hour.
-- D42: no feed-level retry.
-- D45: feeds are independent; a failed feed must not prevent unrelated feeds from updating when the previous state can be safely preserved.
-- D46: final public feed paths are extensionless and mirror RSSHub paths.
-- D73: deploy with the executable floating release `cloudflare/wrangler-action@v4`; `@main` is not an executable action because its generated `dist/index.mjs` is absent.
-- D74: do not specify `wranglerVersion`.
-- D75: record the observed `wrangler-action@v4` tag commit and actual Wrangler `--version` output on every run.
-- Base workflow structure: derived from the supplied `uboot_allinone.yml` architecture: `runner-image -> resolver -> action -> publication`.
-
-## Workflow mapping from uboot_allinone
-
-```text
-U-Boot                         ghactions-rss
-runner-image               -> runner-image
-toolchain                  -> rsshub-image
-action / compile cycle     -> action / Generate RSS Cycle
-release.md                 -> generation-report.md + .json
-GitHub Release             -> short-lived Artifact
-direct release publication -> isolated deploy job
-```
-
-The privileged U-Boot build container, `/dev`/`/sys` mounts, unrestricted capabilities, and `permissions: write-all` are intentionally not inherited.
-
-## Conservative operational defaults used by this package
-
-These were required to make D45 deterministic without adding R2/KV/state branches:
-
-- Previous feed source: current production Cloudflare Pages URL.
-- If the new refresh succeeds, it wins even if the previous Pages copy cannot be read.
-- If the new refresh fails and a valid previous copy exists, preserve it.
-- If the new refresh fails and the previous path is a definite 404, mark the feed `UNAVAILABLE` and continue with unrelated feeds.
-- If the new refresh fails and the previous state cannot be safely determined (network error, 5xx, invalid XML, etc.), mark it `BLOCKED` and stop before deployment to avoid accidentally deleting an existing feed.
-- Removing a feed from `feeds.json` is an explicit deletion in the next successful deployment.
-- The generated `/_feed-state.json` manifest records managed routes so a later run can report explicit `REMOVED` states without directory listing, server-side state, or extra infrastructure.
-
-## No automatic additions
-
-Phase 1 does not add:
-
-- Cache API
-- KV
-- D1
-- R2
-- Durable Objects
-- Pages Functions
-- GitHub Release
-- output/data branch
-- RSS output commits
-- automatic retries
-- automatic route discovery
-- alternate JavBus domains
-- query parameters
+These decisions replace the old Phase 1 policy and its source-copy-only restrictions, as explicitly requested for the new architecture.
