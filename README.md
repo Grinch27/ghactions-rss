@@ -1,27 +1,25 @@
 # ghactions-rss
 
-Generic execution node for official RSSHub Docker and public Cloudflare Pages snapshots. Real subscriptions, generated XML, gateway source and detailed execution state live in a separate private repository, on `main` only. This public repository contains no production subscription list or generated artifacts.
+Public execution node for official RSSHub Docker and the unified Cloudflare Pages publication. The private `Grinch27/cloudflare-RSSHUB_reader` repository owns subscriptions, generated XML, reader code, gateways, execution reports and personal state. Only `main` is used; this public repository contains no production subscription list or generated artifacts.
 
-The gateway registers an exact RSSHub path and query string in the private repository. GitHub Actions collects all enabled registrations at **00:00, 06:00, 12:00 and 18:00 Asia/Shanghai**. GitHub schedules start asynchronously and can be delayed. Registration does not dispatch a workflow or deploy Pages.
+The RSS gateway records an exact RSSHub path and query in the private repository. The single workflow refreshes enabled registrations at **00:00, 06:00, 12:00 and 18:00 Asia/Shanghai**. GitHub schedules run asynchronously and may be delayed. Registration does not dispatch a workflow or build Pages.
 
-Each cycle checks out private `main` using `READONLY`, runs the official `diygod/rsshub:chromium-bundled` image, validates RSS/Atom, fixes the public self URL, preserves valid previous XML on individual failures, and commits `site/` plus `state/` with `WRITEONLY`. Only after saving does it upload `site/` to the new Pages project. Detailed reports stay private. No feed XML, Docker logs or reports are uploaded as public Actions artifacts.
+Each cycle checks out private main with `READONLY`, runs `diygod/rsshub:chromium-bundled`, validates RSS/Atom, retains valid previous XML on source failures, and saves with `WRITEONLY`. Changed public content or enabled membership produces one snapshot commit; no-change cycles retain all public bytes, snapshot ID and generation time, and save private state only. Pages Git integration builds `site/`; this workflow no longer uploads Pages directly.
+
+A unique cycle ID and matching completion report guard every public save. Failed directory replacement restores the previous snapshot; aborted cycles can save private state only. Production builds reject missing snapshots and missing or invalid XML declared available. Feed refresh clocks are ignored when comparing content, while article edits, dates, IDs, ordering and membership changes remain publishable.
+
+The workflow verifies the Pages snapshot and XML, the Reader mount, and existing RSS gateway GET/HEAD responses. Detailed reports stay private; feed XML, Docker logs, private routes and tokens are not uploaded as public artifacts.
 
 Repository secrets:
 
 | Name | Purpose |
 | --- | --- |
-| `READONLY` | Fine-grained token for the data repository, Contents read |
-| `WRITEONLY` | Fine-grained token for the data repository, Contents read and write |
-| `CLOUDFLARE_ACCOUNT_ID` | Existing deployment account |
-| `CLOUDFLARE_API_TOKEN` | Pages deployment |
-| `RSSHUB_ENV` | Optional multiline Docker environment file containing provider cookies/tokens |
+| `READONLY` | Fine-grained token for `Grinch27/cloudflare-RSSHUB_reader`, Contents read |
+| `WRITEONLY` | Fine-grained token for the same repository, Contents read and write |
+| `RSSHUB_ENV` | Optional multiline Docker environment file for upstream credentials |
 
-`WRITEONLY` is a credential name; GitHub Contents write access includes read access. Keep all token values out of source and logs. Set the same two secrets manually in the separate Worker. The execution pipeline does not manage Worker source, routes or secrets.
+`WRITEONLY` names a purpose; GitHub Contents write includes read access. Credentials are configured manually. Existing Cloudflare deployment secrets are retained but are unused by this Git-based publication workflow. Worker runtime secrets are independent and must be authorized separately; this workflow does not modify Worker source, routes or secrets.
 
-Normal code pushes run dependency-free generator tests. A maintenance commit containing `[refresh]` also starts a complete refresh. Manual Run workflow refreshes all subscriptions. No arbitrary route input is exposed in the public workflow.
+Workflow-file pushes to main start a complete refresh. Manual Run workflow does the same by default. After fixing and retrying a failed Pages deployment once, select **verify_existing=true** to verify the current snapshot without starting Docker, fetching upstreams or generating a new snapshot ID. Verification results are saved as private state. Do not dispatch a second run while the push-triggered run is still active.
 
-The one-time `[refresh] [import]` migration imports missing, valid XML from the former Pages project as previous snapshots before refreshing. Its original content dates are retained; migration does not claim the source has refreshed successfully.
-
-The target private repository and new Pages project are configured in the workflow. There is no data/publication branch. The previous Pages project and `/rsshub/*` service are preserved.
-
-Local validation: `python3 -m unittest discover -s tests -v`.
+The canonical workflow source is `integration/ghactions-rss/rss_allinone.yml` in the private repository. Legacy generator files in this public repository remain for history and are not used by the new production workflow. Old repositories, Pages and Workers remain available; their retirement requires separate approval.

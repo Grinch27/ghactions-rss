@@ -1,19 +1,31 @@
+# Requirements: public Actions executes; publish only changed public snapshots.
+# Manual setup: READONLY/WRITEONLY must include Grinch27/cloudflare-RSSHUB_reader.
+# Follow-up: connect the private repository to Pages Git before the first refresh.
+# Optimization: no-op cycles write state/ only; no upload or Reader deploy hook.
+# Risks: never print routes, runtime secrets, response bodies, or token values.
+# Unknowns: credential permissions are checked by real checkout/persistence, never by secret names.
+# Validation: unique cycle/report gates, state-only failures and one explicit Pages retry.
 name: RSSHub private snapshots
 
 on:
   push:
     branches: [main]
-    paths: ['.github/workflows/**', 'scripts/**', 'tests/**']
+    paths: ['.github/workflows/rss_allinone.yml']
   schedule:
     - cron: '0 0,6,12,18 * * *'
       timezone: Asia/Shanghai
   workflow_dispatch:
+    inputs:
+      verify_existing:
+        description: Verify the existing snapshot after retrying its failed Pages deployment once
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: ghactions-rss-${{ github.event_name == 'push' && !contains(github.event.head_commit.message, '[refresh]') && 'validation' || 'production' }}
+  group: ghactions-rss-production
   cancel-in-progress: false
 
 defaults:
@@ -24,53 +36,33 @@ env:
   TZ: Asia/Shanghai
   LANG: C.UTF-8
   GIT_TERMINAL_PROMPT: '0'
-  DATA_REPOSITORY: Grinch27/cloudflare-pages-ghactions-rss
-  PAGES_PROJECT: cloudflare-pages-ghactions-rss
-  PAGES_BASE_URL: https://cloudflare-pages-ghactions-rss.pages.dev
+  DATA_REPOSITORY: Grinch27/cloudflare-RSSHUB_reader
+  PAGES_BASE_URL: https://cloudflare-rsshub-reader.pages.dev
 
 jobs:
-  validate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - name: Check generic generator
-        run: python3 -m unittest discover -s tests -v
-
   runner-image:
-    if: github.event_name != 'push' || contains(github.event.head_commit.message, '[refresh]')
     runs-on: ubuntu-latest
     outputs:
-      image: ${{ steps.runner.outputs.RUNNER_IMAGE }}
+      RUNNER_IMAGE: ${{ steps.runner.outputs.RUNNER_IMAGE }}
     steps:
       - name: Resolve runner image
         id: runner
         uses: Grinch27/github-actions/.github/actions/resolve-runner-image@main
 
   refresh:
-    needs: [validate, runner-image]
-    runs-on: ${{ needs.runner-image.outputs.image }}
+    needs: runner-image
+    runs-on: ${{ needs.runner-image.outputs.RUNNER_IMAGE }}
     timeout-minutes: 90
     steps:
-      - name: Checkout execution code
-        uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - name: Check required credentials
+      - name: Check migration credentials
         env:
           READONLY: ${{ secrets.READONLY }}
           WRITEONLY: ${{ secrets.WRITEONLY }}
-          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          set -euo pipefail
-          if [[ -z "$READONLY" || -z "$WRITEONLY" || -z "$CF_TOKEN" || -z "$CF_ACCOUNT" ]]; then
-            echo 'Required repository secret is missing.' >&2
-            exit 1
-          fi
+          test -n "$READONLY"
+          test -n "$WRITEONLY"
       - name: Checkout private main
-        uses: actions/checkout@v6
+        uses: actions/checkout@main
         with:
           repository: ${{ env.DATA_REPOSITORY }}
           ref: main
@@ -79,28 +71,18 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           show-progress: false
-      - name: Validate private registry and gateway
+      - name: Validate migrated source and reader
+        working-directory: private
         run: |
-          python3 scripts/rss_site.py validate --data-directory private
-          node --test private/worker/tests/*.test.mjs
-      - name: Import existing public baselines during migration
-        if: contains(github.event.head_commit.message, '[import]')
-        run: python3 scripts/rss_site.py migrate --data-directory private --legacy-base-url https://ghactions-rss.pages.dev
-      - name: Initialize distribution during migration
-        if: contains(github.event.head_commit.message, '[bootstrap]')
-        uses: cloudflare/wrangler-action@v4
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          workingDirectory: private
-          command: pages deploy site --project-name=${{ env.PAGES_PROJECT }} --branch=main --commit-dirty=false
-          quiet: 'true'
-      - name: Start official full RSSHub engine
+          npm test
+          npm run validate:rss
+      - name: Start official RSSHub engine
+        if: inputs.verify_existing != true
         env:
           RSSHUB_ENV: ${{ secrets.RSSHUB_ENV }}
         run: |
           set -euo pipefail
-          image="$(python3 scripts/rss_site.py image --data-directory private)"
+          image="$(python3 private/scripts/rss_site.py image --data-directory private)"
           docker pull "$image" >/dev/null
           image_ref="$(docker image inspect --format '{{index .RepoDigests 0}}' "$image")"
           printf 'RSSHUB_IMAGE_REF=%s\n' "$image_ref" >> "$GITHUB_ENV"
@@ -114,55 +96,110 @@ jobs:
           rm -f "$runtime_env"
           for attempt in $(seq 1 60); do
             if curl --fail --silent --max-time 2 http://127.0.0.1:1200/healthz >/dev/null 2>&1; then
-              echo 'RSSHub is ready.'
               exit 0
             fi
             sleep 1
           done
-          echo 'RSSHub readiness failed.' >&2
           exit 1
+      - name: Prepare refresh cycle
+        id: cycle
+        run: python3 -c 'import uuid; print("cycle_id=" + uuid.uuid4().hex)' >> "$GITHUB_OUTPUT"
       - name: Refresh registered subscriptions
         id: generate
+        if: inputs.verify_existing != true
         continue-on-error: true
-        run: python3 scripts/rss_site.py generate --data-directory private
-      - name: Save snapshot and private report
+        env:
+          RSS_CYCLE_ID: ${{ steps.cycle.outputs.cycle_id }}
+        run: python3 private/scripts/rss_site.py generate --data-directory private
+      - name: Save RSS snapshot and private report
         id: persist
-        if: always() && steps.generate.outcome != 'skipped'
+        if: >-
+          always() && steps.generate.outputs.report_saved == 'true' &&
+          steps.generate.outputs.cycle_id == steps.cycle.outputs.cycle_id
         env:
           WRITEONLY: ${{ secrets.WRITEONLY }}
+          RSS_CYCLE_ID: ${{ steps.cycle.outputs.cycle_id }}
+          GENERATION_OUTCOME: ${{ steps.generate.outcome }}
         run: |
-          if [[ -f private/state/latest-cycle.json ]]; then
-            python3 scripts/rss_site.py persist --data-directory private
+          if [[ "$GENERATION_OUTCOME" == success ]]; then
+            python3 private/scripts/rss_site.py persist --data-directory private
           else
-            exit 1
+            python3 private/scripts/rss_site.py persist --data-directory private --state-only
           fi
-      - name: Publish saved private snapshot
-        id: publish
-        if: steps.generate.outputs.publishable == 'true' && steps.persist.outcome == 'success'
-        uses: cloudflare/wrangler-action@v4
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          workingDirectory: private
-          command: pages deploy site --project-name=${{ env.PAGES_PROJECT }} --branch=main --commit-dirty=false
-          quiet: 'true'
-      - name: Verify public snapshot
+      - name: Verify new or existing Pages publication
         id: verify
-        if: steps.publish.outcome == 'success'
+        if: >-
+          steps.generate.outcome == 'success' && steps.generate.outputs.generation_completed == 'true' &&
+          steps.generate.outputs.cycle_id == steps.cycle.outputs.cycle_id &&
+          steps.generate.outputs.publishable == 'true' && steps.persist.outcome == 'success'
         env:
-          CF_DEPLOYMENT_ID: ${{ steps.publish.outputs.pages-deployment-id }}
-          CF_DEPLOYMENT_URL: ${{ steps.publish.outputs.deployment-url }}
-        run: python3 scripts/rss_site.py verify --data-directory private --base-url "$PAGES_BASE_URL"
-      - name: Save private deployment result
-        if: always() && (steps.verify.outcome == 'success' || steps.verify.outcome == 'failure')
+          PAGES_WAIT_SECONDS: ${{ steps.generate.outputs.publication_changed == 'true' && '900' || '0' }}
+          RSS_CYCLE_ID: ${{ steps.cycle.outputs.cycle_id }}
+        run: python3 private/scripts/rss_site.py verify --data-directory private --base-url "$PAGES_BASE_URL" --wait-seconds "$PAGES_WAIT_SECONDS"
+      - name: Verify existing publication after Pages recovery
+        id: recovery
+        if: inputs.verify_existing == true
+        env:
+          RSS_CYCLE_ID: ${{ steps.cycle.outputs.cycle_id }}
+        run: python3 private/scripts/rss_site.py verify --data-directory private --base-url "$PAGES_BASE_URL" --wait-seconds 0 --record-cycle
+      - name: Verify Reader publication
+        if: steps.verify.outcome == 'success' || steps.recovery.outcome == 'success'
+        env:
+          RSS_CYCLE_ID: ${{ steps.cycle.outputs.cycle_id }}
+        run: python3 private/scripts/rss_site.py verify --data-directory private --base-url https://1616255.xyz/reader --wait-seconds 0
+      - name: Verify public RSS gateway
+        if: steps.verify.outcome == 'success' || steps.recovery.outcome == 'success'
+        working-directory: private
+        env:
+          RSS_CYCLE_ID: ${{ steps.cycle.outputs.cycle_id }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+          from urllib.request import Request, urlopen
+          sys.path.insert(0, 'scripts')
+          from rss_site import load_configuration, now, read_json, write_json
+          root = Path.cwd()
+          settings, feeds = load_configuration(root)
+          report = {'verified_at': now(), 'cycle_id': os.environ['RSS_CYCLE_ID'],
+                    'snapshot_id': read_json(root / 'site/_snapshot.json')['snapshot_id'],
+                    'status': 'success', 'checked_feeds': 0}
+          try:
+              for feed in feeds:
+                  path = root / 'site/feeds' / feed['output'] / (feed['id'] + '.xml')
+                  if not path.is_file():
+                      continue
+                  url = settings['public_base_url'].rstrip('/') + feed['route']
+                  with urlopen(Request(url, headers={'Cache-Control': 'no-cache'}), timeout=20) as response:
+                      if response.status != 200 or 'xml' not in response.headers.get('Content-Type', ''):
+                          raise ValueError('INVALID_GATEWAY_RESPONSE')
+                      body = response.read(int(settings['max_response_bytes']) + 1)
+                  if body != path.read_bytes():
+                      raise ValueError('GATEWAY_XML_MISMATCH')
+                  with urlopen(Request(url, method='HEAD'), timeout=20) as response:
+                      if response.status != 200 or response.read(1):
+                          raise ValueError('INVALID_GATEWAY_HEAD')
+                  report['checked_feeds'] += 1
+          except Exception as error:
+              report.update(status='failed', error_type=type(error).__name__)
+              write_json(root / 'state/gateway-verification.json', report)
+              raise SystemExit('PUBLIC_GATEWAY_VERIFICATION_FAILED') from None
+          write_json(root / 'state/gateway-verification.json', report)
+          print(json.dumps({'event': 'public_gateway_verified', 'feeds': report['checked_feeds']}))
+          PY
+      - name: Save private publication result
+        if: >-
+          always() && (steps.verify.outcome == 'success' || steps.verify.outcome == 'failure' ||
+          steps.recovery.outcome == 'success' || steps.recovery.outcome == 'failure')
         env:
           WRITEONLY: ${{ secrets.WRITEONLY }}
-        run: python3 scripts/rss_site.py persist --data-directory private
+          RSS_CYCLE_ID: ${{ steps.cycle.outputs.cycle_id }}
+        run: python3 private/scripts/rss_site.py persist --data-directory private --state-only
       - name: Stop RSSHub
         if: always()
         run: docker rm -f ghactions-rss-runtime >/dev/null 2>&1 || true
       - name: Report blocked cycle
         if: always() && steps.generate.outcome == 'failure'
-        run: |
-          echo 'A requested operation failed. Detailed feed state is in the private repository.' >&2
-          exit 1
+        run: exit 1
