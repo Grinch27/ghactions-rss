@@ -1,10 +1,10 @@
 # Requirements: public Actions executes; publish only changed public snapshots.
 # Manual setup: READONLY/WRITEONLY must include Grinch27/cloudflare-RSSHUB_reader.
-# Follow-up: connect the private repository to Pages Git before the first refresh.
+# Follow-up: connect the private repository to Workers Builds before the first refresh.
 # Optimization: no-op cycles write state/ only; no upload or Reader deploy hook.
 # Risks: never print routes, runtime secrets, response bodies, or token values.
 # Unknowns: credential permissions are checked by real checkout/persistence, never by secret names.
-# Validation: unique cycle/report gates, state-only failures and one explicit Pages retry.
+# Validation: unique cycle/report gates, state-only failures and one explicit Workers build retry.
 name: RSSHub private snapshots
 
 on:
@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       verify_existing:
-        description: Verify the existing snapshot after retrying its failed Pages deployment once
+        description: Verify the existing snapshot after retrying its failed Workers build once
         type: boolean
         default: false
 
@@ -37,7 +37,7 @@ env:
   LANG: C.UTF-8
   GIT_TERMINAL_PROMPT: '0'
   DATA_REPOSITORY: Grinch27/cloudflare-RSSHUB_reader
-  PAGES_BASE_URL: https://cloudflare-rsshub-reader.pages.dev
+  PUBLICATION_BASE_URL: https://1616255.xyz/reader
 
 jobs:
   runner-image:
@@ -126,82 +126,27 @@ jobs:
           else
             python3 private/scripts/rss_site.py persist --data-directory private --state-only
           fi
-      - name: Verify new or existing Pages publication
+      - name: Verify new or existing Static Assets publication
         id: verify
         if: >-
           steps.generate.outcome == 'success' && steps.generate.outputs.generation_completed == 'true' &&
           steps.generate.outputs.cycle_id == steps.cycle.outputs.cycle_id &&
           steps.generate.outputs.publishable == 'true' && steps.persist.outcome == 'success'
         env:
-          PAGES_WAIT_SECONDS: ${{ steps.generate.outputs.publication_changed == 'true' && '900' || '0' }}
+          PUBLICATION_WAIT_SECONDS: ${{ steps.generate.outputs.publication_changed == 'true' && '900' || '0' }}
           RSS_CYCLE_ID: ${{ steps.cycle.outputs.cycle_id }}
-        run: python3 private/scripts/rss_site.py verify --data-directory private --base-url "$PAGES_BASE_URL" --wait-seconds "$PAGES_WAIT_SECONDS"
-      - name: Verify existing publication after Pages recovery
+        run: python3 private/scripts/rss_site.py verify --data-directory private --base-url "$PUBLICATION_BASE_URL" --wait-seconds "$PUBLICATION_WAIT_SECONDS"
+      - name: Verify existing publication after Workers recovery
         id: recovery
         if: inputs.verify_existing == true
         env:
           RSS_CYCLE_ID: ${{ steps.cycle.outputs.cycle_id }}
-        run: python3 private/scripts/rss_site.py verify --data-directory private --base-url "$PAGES_BASE_URL" --wait-seconds 0 --record-cycle
-      - name: Verify Reader publication
+        run: python3 private/scripts/rss_site.py verify --data-directory private --base-url "$PUBLICATION_BASE_URL" --wait-seconds 0 --record-cycle
+      - name: Verify unified Reader and RSS runtime
         if: steps.verify.outcome == 'success' || steps.recovery.outcome == 'success'
         env:
           RSS_CYCLE_ID: ${{ steps.cycle.outputs.cycle_id }}
-        run: python3 private/scripts/rss_site.py verify --data-directory private --base-url https://1616255.xyz/reader --wait-seconds 0
-      - name: Verify public RSS gateway
-        if: steps.verify.outcome == 'success' || steps.recovery.outcome == 'success'
-        working-directory: private
-        env:
-          RSS_CYCLE_ID: ${{ steps.cycle.outputs.cycle_id }}
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-          import re
-          import sys
-          from urllib.request import Request, urlopen
-          sys.path.insert(0, 'scripts')
-          from rss_site import PUBLIC_HEADERS, load_configuration, now, read_json, write_json
-          root = Path.cwd()
-          settings, feeds = load_configuration(root)
-          report = {'verified_at': now(), 'cycle_id': os.environ['RSS_CYCLE_ID'],
-                    'snapshot_id': read_json(root / 'site/_snapshot.json')['snapshot_id'],
-                    'status': 'success', 'checked_feeds': 0}
-          try:
-              for feed in feeds:
-                  path = root / 'site/feeds' / feed['output'] / (feed['id'] + '.xml')
-                  if not path.is_file():
-                      continue
-                  url = settings['public_base_url'].rstrip('/') + feed['route']
-                  report['phase'] = 'GET'
-                  with urlopen(Request(url, headers={**PUBLIC_HEADERS, 'Cache-Control': 'no-cache'}), timeout=20) as response:
-                      if response.status != 200 or 'xml' not in response.headers.get('Content-Type', ''):
-                          raise ValueError('INVALID_GATEWAY_RESPONSE')
-                      body = response.read(int(settings['max_response_bytes']) + 1)
-                  if body != path.read_bytes():
-                      raise ValueError('GATEWAY_XML_MISMATCH')
-                  report['phase'] = 'HEAD'
-                  with urlopen(Request(url, method='HEAD', headers=PUBLIC_HEADERS), timeout=20) as response:
-                      if response.status != 200 or response.read(1):
-                          raise ValueError('INVALID_GATEWAY_HEAD')
-                  report['checked_feeds'] += 1
-          except Exception as error:
-              report.update(status='failed', error_type=type(error).__name__, http_status=getattr(error, 'code', None))
-              if hasattr(error, 'headers'):
-                  report['server'] = error.headers.get('Server')
-                  report['cf_mitigated'] = error.headers.get('cf-mitigated')
-              if hasattr(error, 'read'):
-                  try:
-                      code = json.loads(error.read(4096)).get('error', '')
-                      if isinstance(code, str) and re.fullmatch('[A-Z0-9_]{1,80}', code):
-                          report['gateway_error'] = code
-                  except (ValueError, AttributeError):
-                      pass
-              write_json(root / 'state/gateway-verification.json', report)
-              raise SystemExit('PUBLIC_GATEWAY_VERIFICATION_FAILED') from None
-          write_json(root / 'state/gateway-verification.json', report)
-          print(json.dumps({'event': 'public_gateway_verified', 'feeds': report['checked_feeds']}))
-          PY
+        run: python3 private/scripts/verify_runtime.py --data-directory private
       - name: Save private publication result
         if: >-
           always() && (steps.verify.outcome == 'success' || steps.verify.outcome == 'failure' ||
